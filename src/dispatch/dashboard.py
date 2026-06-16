@@ -22,6 +22,8 @@ Two data-source modes (sidebar toggle):
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -218,15 +220,22 @@ def main() -> None:
         if not ops:
             st.warning("No live ops metrics yet — the dispatcher hasn't written its first "
                        "tick. This page will auto-refresh once it does.")
-        # Reload the page on a timer so new disk writes show up without manual refresh.
-        st.markdown(f'<meta http-equiv="refresh" content="{refresh_sec}">',
-                    unsafe_allow_html=True)
         st.caption(f"⏱️ Auto-refreshing every {refresh_sec}s")
 
     _render_ops_health(ops, latencies)
     live_mae = _render_model_performance(perf, profile)
     X_live, y_live = _live_features(nrows, int(drift_month))
     _render_drift(profile, X_live, y_live, cfg, live_mae)
+
+    if mode == "Live (running stack)":
+        # Rerun in place rather than reloading the page: a full page reload (the
+        # old `<meta http-equiv="refresh">` approach) opens a brand-new Streamlit
+        # session, which resets every sidebar widget — including this radio — back
+        # to its declared default ("Demo replay"). st.rerun() re-executes the
+        # script in the *same* session, so widget state (this toggle, the slider
+        # values, etc.) survives across refreshes.
+        time.sleep(refresh_sec)
+        st.rerun()
 
 
 main()

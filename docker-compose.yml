@@ -72,7 +72,11 @@ services:
       api:
         condition: service_healthy
     volumes:
-      - ./artifacts:/app/artifacts   # rw: writes monitoring/perf_log.jsonl
+      # Not :ro — Docker needs to create the /app/artifacts/monitoring mountpoint
+      # for the named volume below, which fails on a read-only bind mount. The app
+      # itself never writes outside that named volume, so this stays effectively read-only.
+      - ./artifacts:/app/artifacts              # model.joblib + reference_profile.json
+      - monitoring_data:/app/artifacts/monitoring   # rw: writes ops_metrics.json/perf_log.jsonl
     environment:
       KAFKA_BOOTSTRAP: redpanda:9092
       DISPATCH_TOPIC: pickup_events
@@ -96,5 +100,19 @@ services:
       KAFKA_BOOTSTRAP: redpanda:9092
       API_URL: http://api:8000
     volumes:
-      - ./artifacts:/app/artifacts:ro   # model.joblib + reference_profile.json
+      # Not :ro, same reason as the dispatcher above (mountpoint creation for the
+      # named volume below needs a writable parent).
+      - ./artifacts:/app/artifacts      # model.joblib + reference_profile.json
       - ./data:/app/data:ro             # raw CSV for replay/drift panels
+      - monitoring_data:/app/artifacts/monitoring:ro   # same volume the dispatcher writes to
+
+volumes:
+  # Named volume (not a host bind mount) for the dispatcher's live-written
+  # monitoring files. Both ./artifacts and ./data live under ~/Documents,
+  # which on this machine is iCloud Drive-synced — a host bind mount that's
+  # rewritten on every tick races with iCloud's sync daemon, which resolves
+  # the conflict by silently renaming the directory ("monitoring 2", "monitoring 3", ...).
+  # Dispatcher and dashboard end up pointing at the same /app/artifacts/monitoring
+  # path inside their containers, but a Docker-managed volume there sidesteps
+  # the host filesystem entirely, so no sync conflict is possible.
+  monitoring_data:
