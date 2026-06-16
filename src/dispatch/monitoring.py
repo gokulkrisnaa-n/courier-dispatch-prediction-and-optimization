@@ -233,3 +233,31 @@ def load_perf_log(path: str | Path) -> pd.DataFrame:
         return pd.DataFrame()
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     return pd.DataFrame(rows)
+
+
+def save_ops_metrics(metrics: dict[str, Any], path: str | Path) -> Path:
+    """Overwrite the live ops-metrics snapshot, atomically.
+
+    Written via a temp file + ``os.replace`` so a concurrent reader (the
+    dashboard, polling on its own schedule) never sees a half-written file —
+    ``os.replace`` is atomic on both POSIX and Windows.
+    """
+    import os
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(metrics, default=str))
+    os.replace(tmp, path)
+    return path
+
+
+def load_ops_metrics(path: str | Path) -> dict[str, Any]:
+    """Load the live ops-metrics snapshot ({} if the dispatcher hasn't written one yet)."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}   # caught mid-write despite the atomic replace (e.g. truncated read) — retry next poll

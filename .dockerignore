@@ -1,0 +1,24 @@
+# Keep the serving image small — exclude everything not needed at runtime
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Data, notebooks, private docs never go in the image
+data/
+notebooks/
+tests/
+docs/
+
+# Docs / dev files
+*.md
+docker-compose.yml
+.dockerignore
+.gitignore
+
+# Training-only requirements (image uses requirements-serve.txt)
+# requirements.txt

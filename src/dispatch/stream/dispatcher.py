@@ -21,6 +21,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable
 
 import pandas as pd
@@ -62,7 +63,13 @@ class PerfRecord:
 
 class Dispatcher:
     def __init__(
-        self, solver: Solver, global_avg: float, cfg: Config | None = None
+        self,
+        solver: Solver,
+        global_avg: float,
+        cfg: Config | None = None,
+        *,
+        perf_log_path: str | Path | None = None,
+        ops_metrics_path: str | Path | None = None,
     ) -> None:
         self.cfg = cfg or load_config()
         self.solver = solver
@@ -82,6 +89,16 @@ class Dispatcher:
         self.n_ticks = 0
         self.n_assignments = 0
         self.n_late_pickups = 0          # picked up before we could assign
+
+        # Live-write hooks: when set, perf records and ops metrics are persisted
+        # incrementally (as they happen) rather than only at shutdown, so a
+        # dashboard polling these paths sees a running stack update in real time.
+        self.perf_log_path = Path(perf_log_path) if perf_log_path else None
+        self.ops_metrics_path = Path(ops_metrics_path) if ops_metrics_path else None
+        if self.perf_log_path is not None:
+            self.perf_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self.perf_log_path.write_text("")     # start this run's log clean
+        self._flush_ops_metrics()
 
     # ------------------------------------------------------------------ #
     # event handling
@@ -120,6 +137,11 @@ class Dispatcher:
         c = self._courier(e["courier_id"])
         c.lng, c.lat, c.last_seen = e["lng"], e["lat"], t
 
+    def _flush_ops_metrics(self) -> None:
+        if self.ops_metrics_path is not None:
+            from ..monitoring import save_ops_metrics
+            save_ops_metrics(self.ops_metrics(), self.ops_metrics_path)
+
     def _on_order_picked_up(self, e: Event, t: datetime) -> None:
         oid, cid = e["order_id"], e["courier_id"]
         self.open_orders.pop(oid, None)
@@ -129,14 +151,20 @@ class Dispatcher:
         booked = self.pending.pop(oid, None)
         if booked is None:
             self.n_late_pickups += 1
+            self._flush_ops_metrics()        # late_pickups counter just moved — surface it live
             return
         b_cid, assign_time, predicted = booked
         realized = (t - assign_time).total_seconds() / 60.0
         bc = self._courier(b_cid)
         bc.active_orders.discard(oid)
         if realized > 0:
+            record = PerfRecord(assign_time, t, b_cid, oid, predicted, realized)
             bc.durations.append(realized)
-            self.perf_log.append(PerfRecord(assign_time, t, b_cid, oid, predicted, realized))
+            self.perf_log.append(record)
+            if self.perf_log_path is not None:
+                from ..monitoring import save_perf_log
+                save_perf_log([record.__dict__], self.perf_log_path)
+            self._flush_ops_metrics()        # perf_records counter just moved — surface it live
 
     # ------------------------------------------------------------------ #
     # snapshot + tick
@@ -169,6 +197,7 @@ class Dispatcher:
             self.open_orders.pop(oid, None)
         self.n_ticks += 1
         self.n_assignments += len(result.pairs)
+        self._flush_ops_metrics()
         return result
 
     # ------------------------------------------------------------------ #
@@ -317,19 +346,24 @@ def main() -> None:
     tick = float(os.getenv("TICK_EVERY_SEC", "300"))
     max_idle = int(os.getenv("MAX_IDLE_POLLS", "60"))
 
+    monitoring_dir = cfg.artifacts_dir / "monitoring"
+    perf_path = monitoring_dir / "perf_log.jsonl"
+    ops_path = monitoring_dir / "ops_metrics.json"
+
     model = DispatchModel.load(cfg.model_path)         # only for global_avg (cold start)
     bus = KafkaBus(bootstrap, topic)
-    disp = Dispatcher(api_solver(api_url, cfg), model.global_avg, cfg)
+    disp = Dispatcher(
+        api_solver(api_url, cfg), model.global_avg, cfg,
+        perf_log_path=perf_path, ops_metrics_path=ops_path,
+    )
     logger.info("Dispatcher consuming %s topic %s, scoring via %s", bootstrap, topic, api_url)
+    logger.info("Live perf log -> %s · live ops metrics -> %s", perf_path, ops_path)
     try:
         disp.run(bus, tick_every_sec=tick, max_idle_polls=max_idle)
     finally:
         bus.close()
 
-    perf_path = cfg.artifacts_dir / "monitoring" / "perf_log.jsonl"
-    disp.save_perf_log(perf_path)
-    logger.info("Ops metrics: %s", disp.ops_metrics())
-    logger.info("Wrote perf log -> %s", perf_path)
+    logger.info("Final ops metrics: %s", disp.ops_metrics())
 
 
 if __name__ == "__main__":
