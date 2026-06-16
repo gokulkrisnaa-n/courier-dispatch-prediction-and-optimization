@@ -1,0 +1,100 @@
+# Full local stack: Redpanda (Kafka API) + scoring API + producer + dispatcher.
+#
+# Prereq: train first so ./artifacts/model.joblib + reference_profile.json exist:
+#     python -m dispatch.train --full
+# Then:
+#     docker compose up --build
+#
+# Flow: producer replays historic events -> Redpanda -> dispatcher consumes,
+# snapshots state, and POSTs each snapshot to the API /score endpoint.
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.1.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      target: serve
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  producer:
+    build:
+      context: .
+      target: runner
+    command: ["python", "-m", "dispatch.stream.producer"]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data:ro
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      DISPATCH_TOPIC: pickup_events
+      REPLAY_NROWS: "120000"
+      REPLAY_REGION: "0"
+      REPLAY_COMPRESSION: "600"   # 600x: ~1 day of events in a couple minutes
+
+  dispatcher:
+    build:
+      context: .
+      target: runner
+    command: ["python", "-m", "dispatch.stream.dispatcher"]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    volumes:
+      - ./artifacts:/app/artifacts   # rw: writes monitoring/perf_log.jsonl
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      DISPATCH_TOPIC: pickup_events
+      API_URL: http://api:8000
+      TICK_EVERY_SEC: "300"
+      MAX_IDLE_POLLS: "60"
+
+  dashboard:
+    build:
+      context: .
+      target: runner
+    command: ["streamlit", "run", "src/dispatch/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      api:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      API_URL: http://api:8000
+    volumes:
+      - ./artifacts:/app/artifacts:ro   # model.joblib + reference_profile.json
+      - ./data:/app/data:ro             # raw CSV for replay/drift panels

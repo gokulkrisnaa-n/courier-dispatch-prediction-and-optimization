@@ -1,0 +1,90 @@
+# Configuration for the LaDe pickup dispatch system.
+# Loaded by src/dispatch/config.py. Paths are relative to the project root.
+
+paths:
+  raw_csv: data/raw/pickup_sh.csv
+  processed: data/processed/pickup_clean.parquet
+  artifacts_dir: artifacts
+  model: artifacts/model.joblib
+  reference_profile: artifacts/reference_profile.json
+
+# Timestamps in the raw data carry no year (MM-DD HH:MM:SS). LaDe pickup_sh
+# was collected mid-2022; data spans months 05..10 so no year boundary is crossed.
+data:
+  assumed_year: 2022
+  # Shanghai bounding box — anything outside is dropped (applied to GPS coords).
+  bbox:
+    lng_min: 120.8
+    lng_max: 122.2
+    lat_min: 30.6
+    lat_max: 31.9
+
+target:
+  name: pickup_duration_min          # minutes: pickup_time - accept_time
+  drop_nonpositive: true             # remove <= 0 durations
+  upper_pct_clip: 0.99               # drop above 99th percentile
+
+# Temporal split is by accept_time. Train on May..Sep, test on Oct.
+split:
+  test_start_month: 10               # rows with accept_time.month >= this -> test
+  cv_folds: 5                        # TimeSeriesSplit folds for CV
+
+features:
+  # Native-categorical columns for XGBoost (enable_categorical=True).
+  categorical:
+    - region_id
+    - aoi_id
+    - aoi_type
+    - city
+  # Numeric / engineered features.
+  numeric:
+    - lng
+    - lat
+    - accept_loc_missing
+    - hour_sin
+    - hour_cos
+    - dow_sin
+    - dow_cos
+    - is_weekend
+    - is_peak_hour
+    - minutes_since_midnight
+    - window_duration_min
+    - slack_min
+    - distance_to_pickup_km
+    - courier_rolling_avg_min
+    - courier_active_load
+
+courier_history:
+  rolling_window: 20                 # last N pickups for the courier rolling avg
+  min_periods: 1                     # emit after 1 past pickup; else global mean
+
+peak_hours: [7, 8, 9, 11, 12, 17, 18, 19]
+
+model:
+  xgboost:
+    n_estimators: 600
+    max_depth: 8
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 5
+    reg_lambda: 1.0
+    tree_method: hist
+    enable_categorical: true
+    random_state: 42
+
+# Dev convenience: sample N rows for fast iteration (null = full data).
+dev:
+  sample_rows: 150000
+  sample_seed: 42
+
+snapshot:
+  available_from: time_window_start  # column marking when an order opens for pickup
+  recent_window_min: 120             # courier counts as "free" if active within this many minutes of t
+  courier_capacity: null             # max active_load to still be assignable (null = no cap)
+
+stream:
+  time_compression: 60.0             # 1 real second == 60 simulated seconds
+  bus: memory                        # memory | kafka
+  kafka_bootstrap: localhost:9092
+  topic: pickup_events

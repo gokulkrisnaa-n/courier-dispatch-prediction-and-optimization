@@ -1,0 +1,13 @@
+# Slim runtime deps for the serving image only.
+# No streamlit/plotly/pytest; no training extras.
+# xgboost is still required to load + run the saved booster.
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+xgboost==2.0.3
+scipy==1.13.1
+joblib==1.4.2
+pyyaml==6.0.1
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+pydantic==2.7.4
